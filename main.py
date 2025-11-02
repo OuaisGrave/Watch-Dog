@@ -4,6 +4,7 @@ import asyncio
 from flask import Flask
 from threading import Thread
 import discord
+from discord.ext import commands
 from dotenv import load_dotenv
 
 # Load .env file
@@ -24,8 +25,10 @@ intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
 intents.presences = True
+intents.messages = True
 
-client = discord.Client(intents=intents)
+# ====== CLIENT DISCORD + COMMANDS ======
+bot = commands.Bot(command_prefix="!", intents=intents)
 app = Flask(__name__)
 
 # ====== UTILS ======
@@ -42,7 +45,7 @@ def write_last_status(status):
 
 async def send_status_message(is_down: bool):
     """Envoie un message dans le salon configuré."""
-    channel = client.get_channel(CHANNEL_ID)
+    channel = bot.get_channel(CHANNEL_ID)
     if not channel:
         print("Salon introuvable.")
         return
@@ -60,7 +63,7 @@ async def send_status_message(is_down: bool):
 
 async def check_target_status():
     """Vérifie si le bot cible est online / offline."""
-    guild = client.get_guild(GUILD_ID)
+    guild = bot.get_guild(GUILD_ID)
     if not guild:
         print("Serveur introuvable.")
         return
@@ -98,6 +101,25 @@ async def check_target_status():
     else:
         print("Aucun changement.")
 
+# ====== COMMANDE WATCHDOG ======
+@bot.command(name="watchdog")
+async def watchdog_status(ctx):
+    """Commande pour vérifier que Watch Dog fonctionne et expliquer son rôle."""
+    guild = ctx.guild
+    target_bot = await guild.fetch_member(TARGET_BOT_ID)
+    status = "ONLINE" if target_bot and target_bot.status != discord.Status.offline else "OFFLINE"
+
+    embed = discord.Embed(
+        title=f"🤖 Watch Dog est actif !",
+        description=(
+            f"Le bot cible est actuellement **{status}**.\n\n"
+            "Je surveille ce bot et vous avertis automatiquement si son état change.\n"
+            "Tous mes messages d’alerte apparaissent uniquement dans ce salon."
+        ),
+        color=discord.Color.green() if status=="ONLINE" else discord.Color.red()
+    )
+    await ctx.send(embed=embed)
+
 # ====== FLASK (Render ping) ======
 @app.route("/")
 def index():
@@ -105,26 +127,26 @@ def index():
 
 @app.route("/ping")
 def ping():
-    # schedule the check on the bot event loop
-    if not client.is_ready():
+    if not bot.is_ready():
         return "Bot non prêt, vérification non lancée.", 503
-    asyncio.run_coroutine_threadsafe(check_target_status(), client.loop)
+    asyncio.run_coroutine_threadsafe(check_target_status(), bot.loop)
     return "Vérification lancée."
 
 def run_flask():
     port = int(os.getenv("PORT", 3000))
-    # Flask 3 detects environment; use reloader off for production
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
-# ====== DISCORD ======
-@client.event
+# ====== EVENT ON_READY ======
+@bot.event
 async def on_ready():
-    print(f"🤖 Connecté en tant que {client.user}")
-    # Démarrer Flask dans un thread séparé
+    print(f"🤖 Connecté en tant que {bot.user}")
     Thread(target=run_flask, daemon=True).start()
+    # Premier check automatique au démarrage
+    asyncio.create_task(check_target_status())
 
+# ====== LANCEMENT ======
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         print("ERREUR : DISCORD_TOKEN manquant. Remplis le fichier .env avec DISCORD_TOKEN.")
     else:
-        client.run(DISCORD_TOKEN)
+        bot.run(DISCORD_TOKEN)
