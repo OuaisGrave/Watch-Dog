@@ -1,37 +1,42 @@
 import os
 import json
+import time
 import asyncio
-from flask import Flask
 from threading import Thread
+from flask import Flask
 import discord
-from discord.ext import commands
+from discord import app_commands
 from dotenv import load_dotenv
 
-# Load .env file
+# ====== Config ======
 load_dotenv()
-
-# ====== CONFIGURATION via .env ======
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")               # Token du bot surveillant
-GUILD_ID = int(os.getenv("GUILD_ID", "0"))               # ID du serveur
-TARGET_BOT_ID = int(os.getenv("TARGET_BOT_ID", "0"))     # ID du bot à surveiller
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "1434510458315997325"))
 MEMBRE_ROLE_ID = int(os.getenv("MEMBRE_ROLE_ID", "1402041174298198188"))
 BOT_ROLES_ROLE_ID = int(os.getenv("BOT_ROLES_ROLE_ID", "1401997139675975792"))
 
 STATUS_FILE = "status.json"
+PING_TIMEOUT = 120  # secondes max avant de considérer le bot DOWN
 
-# ====== INTENTS DISCORD ======
+# ====== Discord ======
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
 intents.presences = True
-intents.message_content = True  # <- Obligatoire pour lire le contenu des messages
+intents.messages = True
 
-# ====== CLIENT DISCORD + COMMANDS ======
-bot = commands.Bot(command_prefix="!", intents=intents)
+class WatchDogClient(discord.Client):
+    def __init__(self):
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
+
+client = WatchDogClient()
 app = Flask(__name__)
 
-# ====== UTILS ======
+# ====== Utils ======
+last_ping_time = 0
+
 def read_last_status():
     try:
         with open(STATUS_FILE, "r", encoding="utf-8") as f:
@@ -44,8 +49,7 @@ def write_last_status(status):
         json.dump({"status": status}, f, ensure_ascii=False)
 
 async def send_status_message(is_down: bool):
-    """Envoie un message dans le salon configuré."""
-    channel = bot.get_channel(CHANNEL_ID)
+    channel = client.get_channel(CHANNEL_ID)
     if not channel:
         print("Salon introuvable.")
         return
@@ -61,92 +65,56 @@ async def send_status_message(is_down: bool):
 
     await channel.send(msg)
 
-async def check_target_status():
-    """Vérifie si le bot cible est online / offline."""
-    guild = bot.get_guild(GUILD_ID)
-    if not guild:
-        print("Serveur introuvable.")
-        return
-
-    try:
-        member = await guild.fetch_member(TARGET_BOT_ID)
-    except discord.NotFound:
-        member = None
-    except Exception as e:
-        print("Erreur fetching member:", e)
-        member = None
-
-    presence_status = getattr(member, "status", discord.Status.offline)
-    is_up = presence_status != discord.Status.offline
-    previous = read_last_status()
-
-    # Si premier run → enregistrer seulement
-    if previous is None:
-        write_last_status("up" if is_up else "down")
-        print(f"Statut initial : {'up' if is_up else 'down'}")
-        return
-
-    # Transition DOWN
-    if previous == "up" and not is_up:
-        await send_status_message(True)
-        write_last_status("down")
-        print("🔴 Bot est DOWN")
-
-    # Transition UP
-    elif previous == "down" and is_up:
-        await send_status_message(False)
-        write_last_status("up")
-        print("🟢 Bot est UP")
-
-    else:
-        print("Aucun changement.")
-
-# ====== COMMANDE WATCHDOG ======
-@bot.command(name="watchdog")
-async def watchdog_status(ctx):
-    """Commande pour vérifier que Watch Dog fonctionne et expliquer son rôle."""
-    guild = ctx.guild
-    target_bot = await guild.fetch_member(TARGET_BOT_ID)
-    status = "ONLINE" if target_bot and target_bot.status != discord.Status.offline else "OFFLINE"
-
-    embed = discord.Embed(
-        title=f"🤖 Watch Dog est actif !",
-        description=(
-            f"Le bot cible est actuellement **{status}**.\n\n"
-            "Je surveille ce bot et vous avertis automatiquement si son état change.\n"
-            "Tous mes messages d’alerte apparaissent uniquement dans ce salon."
-        ),
-        color=discord.Color.green() if status=="ONLINE" else discord.Color.red()
-    )
-    await ctx.send(embed=embed)
-
-# ====== FLASK (Render ping) ======
+# ====== Endpoint ping cronjob ======
 @app.route("/")
-def index():
-    return "✅ Bot Monitor Actif"
+def cronjob_ping():
+    global last_ping_time
+    last_ping_time = time.time()
+    return "Ping reçu du cronjob."
 
-@app.route("/ping")
-def ping():
-    if not bot.is_ready():
-        return "Bot non prêt, vérification non lancée.", 503
-    asyncio.run_coroutine_threadsafe(check_target_status(), bot.loop)
-    return "Vérification lancée."
+# ====== Surveillance UP/DOWN ======
+async def monitor_bot_status():
+    global last_ping_time
+    while True:
+        previous = read_last_status()
+        now = time.time()
+        is_up = (now - last_ping_time) <= PING_TIMEOUT
 
+        if previous == "up" and not is_up:
+            await send_status_message(True)
+            write_last_status("down")
+        elif previous == "down" and is_up:
+            await send_status_message(False)
+            write_last_status("up")
+        await asyncio.sleep(10)  # vérifie toutes les 10s
+
+# ====== Commande slash ======
+@client.tree.command(name="watchdog", description="Vérifie l'état du bot cible via cronjob")
+async def watchdog(interaction: discord.Interaction):
+    previous = read_last_status()
+    status_text = "ONLINE" if previous == "up" else "OFFLINE"
+    await interaction.response.send_message(
+        f"🤖 Watch Dog est actif !\nLe bot cible est actuellement **{status_text}**.\n"
+        "Je surveille le bot via le cronjob et vous préviens automatiquement si son état change.\n"
+        "Tous mes messages d’alerte apparaissent uniquement dans le salon configuré."
+    )
+
+# ====== Flask thread ======
 def run_flask():
     port = int(os.getenv("PORT", 3000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
-# ====== EVENT ON_READY ======
-@bot.event
+# ====== Event on_ready ======
+@client.event
 async def on_ready():
-    print(f"🤖 Connecté en tant que {bot.user}")
+    print(f"🤖 Connecté en tant que {client.user}")
     Thread(target=run_flask, daemon=True).start()
-    # Premier check automatique au démarrage
-    asyncio.create_task(check_target_status())
+    asyncio.create_task(monitor_bot_status())
+    await client.tree.sync()
 
-# ====== LANCEMENT ======
+# ====== Lancement ======
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
-        print("ERREUR : DISCORD_TOKEN manquant. Remplis le fichier .env avec DISCORD_TOKEN.")
+        print("ERREUR : DISCORD_TOKEN manquant dans .env")
     else:
-        bot.run(DISCORD_TOKEN)
+        client.run(DISCORD_TOKEN)
