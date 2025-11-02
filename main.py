@@ -13,7 +13,6 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "1434510458315997325"))
-MEMBRE_ROLE_ID = int(os.getenv("MEMBRE_ROLE_ID", "1402041174298198188"))
 BOT_ROLES_ROLE_ID = int(os.getenv("BOT_ROLES_ROLE_ID", "1401997139675975792"))
 
 STATUS_FILE = "status.json"
@@ -49,19 +48,38 @@ def write_last_status(status):
         json.dump({"status": status}, f, ensure_ascii=False)
 
 async def send_status_message(is_down: bool):
+    """Message envoyé uniquement en cas de changement de statut."""
     channel = client.get_channel(CHANNEL_ID)
     if not channel:
         print("Salon introuvable.")
         return
 
-    membre_mention = f"<@&{MEMBRE_ROLE_ID}>"
     bot_roles_mention = f"<@&{BOT_ROLES_ROLE_ID}>"
     now = discord.utils.format_dt(discord.utils.utcnow(), style='f')
 
     if is_down:
-        msg = f"{membre_mention} • {bot_roles_mention} est **DOWN** ⛔\n> Détecté le {now}."
+        msg = f"{bot_roles_mention} est **DOWN** ⛔\n> Détecté le {now}."
     else:
-        msg = f"{membre_mention} • {bot_roles_mention} est de nouveau **UP** ✅\n> Détecté le {now}."
+        msg = f"{bot_roles_mention} est de nouveau **UP** ✅\n> Détecté le {now}."
+
+    await channel.send(msg)
+
+async def send_ping_message():
+    """Message envoyé après chaque ping, même sans changement de statut."""
+    channel = client.get_channel(CHANNEL_ID)
+    if not channel:
+        print("Salon introuvable.")
+        return
+
+    bot_roles_mention = f"<@&{BOT_ROLES_ROLE_ID}>"
+    now = discord.utils.format_dt(discord.utils.utcnow(), style='f')
+
+    is_up = (time.time() - last_ping_time) <= PING_TIMEOUT
+
+    if is_up:
+        msg = f"{bot_roles_mention} est **UP** ✅\n> Détecté le {now}."
+    else:
+        msg = f"{bot_roles_mention} est **DOWN** ⛔\n> Détecté le {now}."
 
     await channel.send(msg)
 
@@ -70,6 +88,7 @@ async def send_status_message(is_down: bool):
 def cronjob_ping():
     global last_ping_time
     last_ping_time = time.time()
+    asyncio.run_coroutine_threadsafe(send_ping_message(), client.loop)
     return "Ping reçu du cronjob."
 
 # ====== Surveillance UP/DOWN ======
@@ -77,26 +96,30 @@ async def monitor_bot_status():
     global last_ping_time
     while True:
         previous = read_last_status()
-        now = time.time()
-        is_up = (now - last_ping_time) <= PING_TIMEOUT
+        is_up = (time.time() - last_ping_time) <= PING_TIMEOUT
 
+        # Détection de changement
         if previous == "up" and not is_up:
             await send_status_message(True)
             write_last_status("down")
         elif previous == "down" and is_up:
             await send_status_message(False)
             write_last_status("up")
+
         await asyncio.sleep(10)  # vérifie toutes les 10s
 
 # ====== Commande slash ======
-@client.tree.command(name="watchdog", description="Vérifie l'état du bot cible via cronjob")
+@client.tree.command(name="watchdog", description="Vérifie l'état du bot cible")
 async def watchdog(interaction: discord.Interaction):
-    previous = read_last_status()
-    status_text = "ONLINE" if previous == "up" else "OFFLINE"
+    is_up = (time.time() - last_ping_time) <= PING_TIMEOUT
+    status_text = "ONLINE" if is_up else "OFFLINE"
+    bot_roles_mention = f"<@&{BOT_ROLES_ROLE_ID}>"
+
     await interaction.response.send_message(
-        f"🤖 Watch Dog est actif !\nLe bot cible est actuellement **{status_text}**.\n"
-        "Je surveille le bot via le cronjob et vous préviens automatiquement si son état change.\n"
-        "Tous mes messages d’alerte apparaissent uniquement dans le salon configuré."
+        f"🤖 Watch Dog est actif !\n"
+        f"Le bot {bot_roles_mention} est actuellement **{status_text}**.\n"
+        "⚡ Je vous informe automatiquement de son statut.\n"
+        "📌 Tous mes messages d'état apparaissent uniquement dans le salon prévu à cet effet."
     )
 
 # ====== Flask thread ======
