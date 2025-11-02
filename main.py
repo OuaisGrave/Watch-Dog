@@ -25,7 +25,7 @@ intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
 intents.presences = True
-intents.messages = True
+intents.message_content = True  # <- Obligatoire pour lire le contenu des messages
 
 # ====== CLIENT DISCORD + COMMANDS ======
 bot = commands.Bot(command_prefix="!", intents=intents)
