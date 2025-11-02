@@ -48,7 +48,7 @@ def write_last_status(status):
         json.dump({"status": status}, f, ensure_ascii=False)
 
 async def send_status_message(is_down: bool):
-    """Message envoyé uniquement en cas de changement de statut."""
+    """Envoie un message uniquement en cas de changement de statut."""
     channel = client.get_channel(CHANNEL_ID)
     if not channel:
         print("Salon introuvable.")
@@ -64,31 +64,11 @@ async def send_status_message(is_down: bool):
 
     await channel.send(msg)
 
-async def send_ping_message():
-    """Message envoyé après chaque ping, même sans changement de statut."""
-    channel = client.get_channel(CHANNEL_ID)
-    if not channel:
-        print("Salon introuvable.")
-        return
-
-    bot_roles_mention = f"<@&{BOT_ROLES_ROLE_ID}>"
-    now = discord.utils.format_dt(discord.utils.utcnow(), style='f')
-
-    is_up = (time.time() - last_ping_time) <= PING_TIMEOUT
-
-    if is_up:
-        msg = f"{bot_roles_mention} est **UP** ✅\n> Détecté le {now}."
-    else:
-        msg = f"{bot_roles_mention} est **DOWN** ⛔\n> Détecté le {now}."
-
-    await channel.send(msg)
-
 # ====== Endpoint ping cronjob ======
 @app.route("/")
 def cronjob_ping():
     global last_ping_time
     last_ping_time = time.time()
-    asyncio.run_coroutine_threadsafe(send_ping_message(), client.loop)
     return "Ping reçu du cronjob."
 
 # ====== Surveillance UP/DOWN ======
@@ -98,15 +78,22 @@ async def monitor_bot_status():
         previous = read_last_status()
         is_up = (time.time() - last_ping_time) <= PING_TIMEOUT
 
-        # Détection de changement
-        if previous == "up" and not is_up:
+        # Premier lancement → on enregistre simplement l’état
+        if previous is None:
+            write_last_status("up" if is_up else "down")
+            print(f"Statut initial : {'up' if is_up else 'down'}")
+        # Changement : UP → DOWN
+        elif previous == "up" and not is_up:
             await send_status_message(True)
             write_last_status("down")
+            print("🔴 Bot DOWN")
+        # Changement : DOWN → UP
         elif previous == "down" and is_up:
             await send_status_message(False)
             write_last_status("up")
+            print("🟢 Bot UP")
 
-        await asyncio.sleep(10)  # vérifie toutes les 10s
+        await asyncio.sleep(10)  # vérifie toutes les 10 secondes
 
 # ====== Commande slash ======
 @client.tree.command(name="watchdog", description="Vérifie l'état du bot cible")
@@ -134,6 +121,7 @@ async def on_ready():
     Thread(target=run_flask, daemon=True).start()
     asyncio.create_task(monitor_bot_status())
     await client.tree.sync()
+    print("✅ Commandes slash synchronisées.")
 
 # ====== Lancement ======
 if __name__ == "__main__":
